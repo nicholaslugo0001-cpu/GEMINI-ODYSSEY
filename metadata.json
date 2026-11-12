@@ -1,0 +1,6 @@
+{
+  "name": "Gemini Odyssey",
+  "description": "3D Web Dimension Adventure RPG where you play as Gemini battling viruses, ad-ware, and hackers to earn Google Coins and User Rating Stars.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
