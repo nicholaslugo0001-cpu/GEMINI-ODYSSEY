@@ -239,6 +239,12 @@ data class ShockwaveRing(
     val maxLife: Float
 )
 
+enum class AutopilotStance(val label: String) {
+    BALANCED("BALANCED"),
+    AGGRESSIVE("ASSAULT"),
+    OBJECTIVE("OBJECTIVE")
+}
+
 data class ArenaHudState(
     val sector: SectorDefinition,
     val wave: Int = 1,
@@ -269,12 +275,25 @@ data class ArenaHudState(
     val hasAdBlockBubble: Boolean = false,
     val hasSpeedUp: Boolean = false,
     val hasAttackMultiplier: Boolean = false,
-    val bannerMessage: String? = null
+    val bannerMessage: String? = null,
+    val isAutopilotEnabled: Boolean = false,
+    val autopilotStance: AutopilotStance = AutopilotStance.BALANCED,
+    val autopilotStatus: String = "STANDBY"
 )
 
 enum class HapticEvent {
     LIGHT_ATTACK,
     HEAVY_ATTACK,
+    DAMAGE_TAKEN,
+    SHIELD_BLOCK,
+    ITEM_COLLECTED,
+    DASH
+}
+
+enum class SoundEvent {
+    LIGHT_ATTACK,
+    HEAVY_ATTACK,
+    ENEMY_HIT,
     DAMAGE_TAKEN,
     SHIELD_BLOCK,
     ITEM_COLLECTED,

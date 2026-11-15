@@ -63,7 +63,11 @@ data class PlayerProgress(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val highContrast: Boolean = false,
     val largeTouchTargets: Boolean = false,
-    val reducedMotion: Boolean = false
+    val reducedMotion: Boolean = false,
+    val soundEnabled: Boolean = true,
+    val hapticsEnabled: Boolean = true,
+    val musicEnabled: Boolean = true,
+    val selectedMusicTrackId: String = "AUTO"
 ) {
     val xpForNextLevel: Int
         get() = 80 + (level - 1) * 45
@@ -112,6 +116,10 @@ class PlayerProgressRepository(private val context: Context) {
         val HIGH_CONTRAST = booleanPreferencesKey("high_contrast")
         val LARGE_TOUCH = booleanPreferencesKey("large_touch_targets")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
+        val SOUND_ENABLED = booleanPreferencesKey("sound_enabled")
+        val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
+        val MUSIC_ENABLED = booleanPreferencesKey("music_enabled")
+        val SELECTED_MUSIC_TRACK_ID = stringPreferencesKey("selected_music_track_id")
 
         fun sectorStarKey(sectorId: String) = intPreferencesKey("sector_stars_$sectorId")
     }
@@ -145,7 +153,11 @@ class PlayerProgressRepository(private val context: Context) {
             }.getOrDefault(ThemeMode.SYSTEM),
             highContrast = prefs[Keys.HIGH_CONTRAST] ?: false,
             largeTouchTargets = prefs[Keys.LARGE_TOUCH] ?: false,
-            reducedMotion = prefs[Keys.REDUCED_MOTION] ?: false
+            reducedMotion = prefs[Keys.REDUCED_MOTION] ?: false,
+            soundEnabled = prefs[Keys.SOUND_ENABLED] ?: true,
+            hapticsEnabled = prefs[Keys.HAPTICS_ENABLED] ?: true,
+            musicEnabled = prefs[Keys.MUSIC_ENABLED] ?: true,
+            selectedMusicTrackId = prefs[Keys.SELECTED_MUSIC_TRACK_ID] ?: "AUTO"
         )
     }
 
@@ -163,6 +175,22 @@ class PlayerProgressRepository(private val context: Context) {
 
     suspend fun setReducedMotion(enabled: Boolean) {
         context.dataStore.edit { it[Keys.REDUCED_MOTION] = enabled }
+    }
+
+    suspend fun setSoundEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SOUND_ENABLED] = enabled }
+    }
+
+    suspend fun setHapticsEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.HAPTICS_ENABLED] = enabled }
+    }
+
+    suspend fun setMusicEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.MUSIC_ENABLED] = enabled }
+    }
+
+    suspend fun setSelectedMusicTrack(trackId: String) {
+        context.dataStore.edit { it[Keys.SELECTED_MUSIC_TRACK_ID] = trackId }
     }
 
     suspend fun addXp(earnedXp: Int) {

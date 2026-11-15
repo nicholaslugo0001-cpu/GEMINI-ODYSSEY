@@ -1,0 +1,395 @@
+{
+  "entities": {
+    "UserProgress": {
+      "title": "UserProgress",
+      "description": "Cloud-synced player progression, stats, upgrades, and sector star ratings for Gemini Odyssey.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the player."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Player display name."
+        },
+        "googleCoins": {
+          "type": "integer",
+          "description": "Current spendable Google Coins."
+        },
+        "totalCoinsCollected": {
+          "type": "integer",
+          "description": "Lifetime Google Coins collected."
+        },
+        "level": {
+          "type": "integer",
+          "description": "Current Gemini Knight level."
+        },
+        "xp": {
+          "type": "integer",
+          "description": "Current XP toward next level."
+        },
+        "skillPoints": {
+          "type": "integer",
+          "description": "Available stat skill points."
+        },
+        "attackStat": {
+          "type": "integer",
+          "description": "Attack stat level."
+        },
+        "defenseStat": {
+          "type": "integer",
+          "description": "Defense stat level."
+        },
+        "staminaStat": {
+          "type": "integer",
+          "description": "Stamina stat level."
+        },
+        "healthStat": {
+          "type": "integer",
+          "description": "Health stat level."
+        },
+        "tpuCoreLevel": {
+          "type": "integer",
+          "description": "TPU Blade upgrade level."
+        },
+        "contextWindowLevel": {
+          "type": "integer",
+          "description": "Aegis Core upgrade level."
+        },
+        "fiberOpticLevel": {
+          "type": "integer",
+          "description": "Fiber Boots upgrade level."
+        },
+        "neuralMagnetLevel": {
+          "type": "integer",
+          "description": "Neural Magnet upgrade level."
+        },
+        "sectorStars": {
+          "type": "object",
+          "description": "Map of sector IDs to earned star counts (0-5)."
+        },
+        "missionsCompleted": {
+          "type": "integer",
+          "description": "Total completed missions."
+        },
+        "virusesPurged": {
+          "type": "integer",
+          "description": "Total Trojan Imps defeated."
+        },
+        "adwareBlocked": {
+          "type": "integer",
+          "description": "Total Ad-Ware Bots defeated."
+        },
+        "hackersOutsmarted": {
+          "type": "integer",
+          "description": "Total Hacker Rogues defeated."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when cloud profile was created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when cloud profile was last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "googleCoins",
+        "totalCoinsCollected",
+        "level",
+        "xp",
+        "skillPoints",
+        "attackStat",
+        "defenseStat",
+        "staminaStat",
+        "healthStat",
+        "tpuCoreLevel",
+        "contextWindowLevel",
+        "fiberOpticLevel",
+        "neuralMagnetLevel",
+        "sectorStars",
+        "missionsCompleted",
+        "virusesPurged",
+        "adwareBlocked",
+        "hackersOutsmarted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Global leaderboard entry for signed-in Gemini Odyssey players.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the player."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public display name for the leaderboard."
+        },
+        "level": {
+          "type": "integer",
+          "description": "Current player level."
+        },
+        "totalStars": {
+          "type": "integer",
+          "description": "Total earned sector stars (0-20)."
+        },
+        "totalCoinsCollected": {
+          "type": "integer",
+          "description": "Lifetime Google Coins collected."
+        },
+        "missionsCompleted": {
+          "type": "integer",
+          "description": "Total missions completed."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when entry was created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when entry was last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "level",
+        "totalStars",
+        "totalCoinsCollected",
+        "missionsCompleted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CoopRoom": {
+      "title": "CoopRoom",
+      "description": "Online 4-player co-op room state for Gemini Odyssey.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "Unique 6-character room code matching document ID."
+        },
+        "roomCode": {
+          "type": "string",
+          "description": "Shareable 6-character join code."
+        },
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase UID of the room host."
+        },
+        "sectorId": {
+          "type": "string",
+          "description": "Selected Web Sector ID."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "playing", "finished"],
+          "description": "Current room lifecycle state."
+        },
+        "memberUids": {
+          "type": "array",
+          "description": "Bounded list of up to 4 participating player UIDs."
+        },
+        "wave": {
+          "type": "integer",
+          "description": "Current stage wave."
+        },
+        "nodesIndexed": {
+          "type": "integer",
+          "description": "Count of search nodes indexed."
+        },
+        "bossHp": {
+          "type": "number",
+          "description": "Current boss HP if active."
+        },
+        "bossMaxHp": {
+          "type": "number",
+          "description": "Boss max HP if active."
+        },
+        "enemySnapshots": {
+          "type": "array",
+          "description": "Bounded list (max 25) of host enemy positions and HP."
+        },
+        "isVictory": {
+          "type": "boolean",
+          "description": "Whether the co-op mission ended in victory."
+        },
+        "starsEarned": {
+          "type": "integer",
+          "description": "Stars earned on stage completion (0-5)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when room was created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when room was last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "roomId",
+        "roomCode",
+        "hostUid",
+        "sectorId",
+        "status",
+        "memberUids",
+        "wave",
+        "nodesIndexed",
+        "bossHp",
+        "bossMaxHp",
+        "enemySnapshots",
+        "isVictory",
+        "starsEarned",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CoopRoomPlayer": {
+      "title": "CoopRoomPlayer",
+      "description": "Real-time player state inside a 4-player online co-op room.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the player."
+        },
+        "roomId": {
+          "type": "string",
+          "description": "Parent room ID."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Player display name."
+        },
+        "colorIndex": {
+          "type": "integer",
+          "description": "Squad color slot 0..3 (Google Blue, Red, Gold, Green)."
+        },
+        "ready": {
+          "type": "boolean",
+          "description": "Lobby ready flag."
+        },
+        "x": {
+          "type": "number",
+          "description": "Arena world X coordinate."
+        },
+        "y": {
+          "type": "number",
+          "description": "Arena world Y coordinate."
+        },
+        "facingAngle": {
+          "type": "number",
+          "description": "Character facing radians."
+        },
+        "hp": {
+          "type": "number",
+          "description": "Current HP."
+        },
+        "maxHp": {
+          "type": "number",
+          "description": "Maximum HP."
+        },
+        "isGuarding": {
+          "type": "boolean",
+          "description": "Shield guard active state."
+        },
+        "isSlashing": {
+          "type": "boolean",
+          "description": "Sword slash animation active state."
+        },
+        "slashComboStep": {
+          "type": "integer",
+          "description": "Combo step 0..2."
+        },
+        "walkPhase": {
+          "type": "number",
+          "description": "Walk cycle phase."
+        },
+        "hitSeq": {
+          "type": "integer",
+          "description": "Monotonic hit event counter for guest damage reporting."
+        },
+        "lastHitEnemyId": {
+          "type": "integer",
+          "description": "Target enemy ID of latest hit."
+        },
+        "lastHitDamage": {
+          "type": "number",
+          "description": "Damage amount of latest hit."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when player joined (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when player state updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "roomId",
+        "displayName",
+        "colorIndex",
+        "ready",
+        "x",
+        "y",
+        "facingAngle",
+        "hp",
+        "maxHp",
+        "isGuarding",
+        "isSlashing",
+        "slashComboStep",
+        "walkPhase",
+        "hitSeq",
+        "lastHitEnemyId",
+        "lastHitDamage",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProgress"
+      },
+      "description": "Per-user cloud-synced game progression."
+    },
+    "/leaderboard/{userId}": {
+      "schema": {
+        "$ref": "#/entities/LeaderboardEntry"
+      },
+      "description": "Global leaderboard entries readable by authenticated players and writable only by the owning user."
+    },
+    "/rooms/{roomId}": {
+      "schema": {
+        "$ref": "#/entities/CoopRoom"
+      },
+      "description": "4-player online co-op rooms keyed by room code."
+    },
+    "/rooms/{roomId}/players/{playerId}": {
+      "schema": {
+        "$ref": "#/entities/CoopRoomPlayer"
+      },
+      "description": "Per-player live state inside a co-op room."
+    }
+  }
+}

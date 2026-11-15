@@ -2,6 +2,9 @@ package com.example.game
 
 import androidx.compose.ui.graphics.Color
 import com.example.data.PlayerProgress
+import com.example.multiplayer.CoopEnemySnapshot
+import com.example.multiplayer.CoopWorldSnapshot
+import com.example.multiplayer.RemotePlayerState
 import com.example.ui.theme.GeminiCyan
 import com.example.ui.theme.GoogleGold
 import com.example.ui.theme.GoogleGreen
@@ -95,6 +98,138 @@ class GameEngine(
     private var comboResetTimer = 0f
     private var itemSpawnTimer = 10f
     private val pendingHaptics = mutableListOf<HapticEvent>()
+    private val pendingSounds = mutableListOf<SoundEvent>()
+
+    var isCoopGuest: Boolean = false
+    val remotePlayers = mutableListOf<RemotePlayerState>()
+    var hitSeqCounter: Long = 0L
+        private set
+    var lastHitEnemyId: Int = -1
+        private set
+    var lastHitDamage: Float = 0f
+        private set
+
+    var isAutopilotEnabled: Boolean = false
+        private set
+    var autopilotStance: AutopilotStance = AutopilotStance.BALANCED
+        private set
+    var autopilotStatus: String = "STANDBY"
+        private set
+    private var autopilotGuardTimer: Float = 0f
+
+    fun setAutopilot(enabled: Boolean) {
+        if (isAutopilotEnabled == enabled) return
+        isAutopilotEnabled = enabled
+        if (enabled) {
+            moveTargetX = null
+            moveTargetY = null
+            autopilotStatus = "Scanning Arena"
+            bannerMessage = "AI AUTOPILOT ENGAGED (${autopilotStance.label})"
+            bannerTimer = 2.0f
+            spawnFloatingText(player.x, player.y - 40f, "AUTOPILOT ON", GeminiCyan, isCrit = true)
+        } else {
+            autopilotGuardTimer = 0f
+            if (player.isGuarding) {
+                player = player.copy(isGuarding = false)
+            }
+            autopilotStatus = "STANDBY"
+            bannerMessage = "MANUAL CONTROL RESTORED"
+            bannerTimer = 1.6f
+            spawnFloatingText(player.x, player.y - 40f, "MANUAL MODE", GoogleGold)
+        }
+    }
+
+    fun cycleAutopilotStance() {
+        val stances = AutopilotStance.entries
+        autopilotStance = stances[(autopilotStance.ordinal + 1) % stances.size]
+        if (isAutopilotEnabled) {
+            bannerMessage = "AUTOPILOT STANCE: ${autopilotStance.label}"
+            bannerTimer = 1.6f
+            spawnFloatingText(player.x, player.y - 40f, autopilotStance.label, GoogleGold)
+        }
+    }
+
+    fun updateRemotePlayers(list: List<RemotePlayerState>) {
+        remotePlayers.clear()
+        remotePlayers.addAll(list)
+    }
+
+    fun applyRemotePlayerHit(enemyId: Int, damage: Float) {
+        if (damage <= 0f || isCoopGuest || isMissionOver) return
+        val idx = enemies.indexOfFirst { it.id == enemyId }
+        if (idx < 0) return
+        val enemy = enemies[idx]
+        val updated = enemy.copy(hp = enemy.hp - damage, hitFlashTimer = 0.16f)
+        spawnFloatingText(enemy.x, enemy.y - 26f, "-${damage.toInt()}", GeminiCyan)
+        spawnParticles(enemy.x, enemy.y, GeminiCyan, count = 5)
+        if (updated.hp <= 0f) {
+            enemies.removeAt(idx)
+            onEnemyDefeated(updated)
+        } else {
+            enemies[idx] = updated
+        }
+    }
+
+    fun exportWorldSnapshot(): CoopWorldSnapshot {
+        val boss = enemies.firstOrNull { it.type == EnemyType.SECTOR_BOSS }
+        return CoopWorldSnapshot(
+            wave = currentWave,
+            totalWaves = sector.waves,
+            nodesIndexed = searchNodes.count { it.indexed },
+            totalNodes = searchNodes.size,
+            bossHp = boss?.hp,
+            bossMaxHp = boss?.maxHp,
+            isMissionOver = isMissionOver,
+            isVictory = isVictory,
+            starsEarned = starsEarned,
+            enemies = enemies.take(25).map { e ->
+                CoopEnemySnapshot(
+                    id = e.id,
+                    typeName = e.type.name,
+                    x = e.x,
+                    y = e.y,
+                    hp = e.hp,
+                    maxHp = e.maxHp,
+                    facingAngle = e.facingAngle,
+                    stunTimer = e.stunTimer
+                )
+            }
+        )
+    }
+
+    fun applyHostWorldSnapshot(snapshot: CoopWorldSnapshot) {
+        if (!isCoopGuest) return
+        currentWave = snapshot.wave
+        if (snapshot.isMissionOver && !isMissionOver) {
+            isMissionOver = true
+            isVictory = snapshot.isVictory
+            starsEarned = snapshot.starsEarned
+            if (isVictory) {
+                coinsCollected += sector.coinBonus
+            }
+        }
+        val existingById = enemies.associateBy { it.id }
+        enemies.clear()
+        snapshot.enemies.forEach { snap ->
+            val type = runCatching { EnemyType.valueOf(snap.typeName) }.getOrDefault(EnemyType.TROJAN_VIRUS)
+            val prev = existingById[snap.id]
+            val tookHit = prev != null && snap.hp < prev.hp
+            enemies.add(
+                EnemyEntity(
+                    id = snap.id,
+                    type = type,
+                    x = snap.x,
+                    y = snap.y,
+                    hp = snap.hp,
+                    maxHp = snap.maxHp,
+                    facingAngle = snap.facingAngle,
+                    hitFlashTimer = if (tookHit) 0.14f else max(0f, (prev?.hitFlashTimer ?: 0f) - 0.05f),
+                    stunTimer = snap.stunTimer,
+                    walkPhase = (prev?.walkPhase ?: 0f) + 0.25f
+                )
+            )
+        }
+    }
 
     fun drainHapticEvents(): List<HapticEvent> {
         if (pendingHaptics.isEmpty()) return emptyList()
@@ -103,9 +238,22 @@ class GameEngine(
         return copy
     }
 
+    fun drainSoundEvents(): List<SoundEvent> {
+        if (pendingSounds.isEmpty()) return emptyList()
+        val copy = pendingSounds.toList()
+        pendingSounds.clear()
+        return copy
+    }
+
     private fun emitHaptic(event: HapticEvent) {
         if (pendingHaptics.size < 8) {
             pendingHaptics.add(event)
+        }
+    }
+
+    private fun emitSound(event: SoundEvent) {
+        if (pendingSounds.size < 8) {
+            pendingSounds.add(event)
         }
     }
 
@@ -385,10 +533,17 @@ class GameEngine(
                     )
                     spawnParticles(enemy.x, enemy.y, GeminiCyan, count = 7)
                     hitAny = true
+                    hitSeqCounter++
+                    lastHitEnemyId = enemy.id
+                    lastHitDamage = dmg
                     if (isCrit) hitHeavy = true
                     if (updated.hp <= 0f) {
-                        eIter.remove()
-                        onEnemyDefeated(updated)
+                        if (isCoopGuest) {
+                            eIter.set(updated.copy(hp = 1f))
+                        } else {
+                            eIter.remove()
+                            onEnemyDefeated(updated)
+                        }
                     } else {
                         eIter.set(updated)
                     }
@@ -429,6 +584,7 @@ class GameEngine(
             }
         }
         emitHaptic(if (hitHeavy || hitAny) HapticEvent.HEAVY_ATTACK else HapticEvent.LIGHT_ATTACK)
+        emitSound(if (hitAny) SoundEvent.ENEMY_HIT else if (isSpinCleave) SoundEvent.HEAVY_ATTACK else SoundEvent.LIGHT_ATTACK)
     }
 
     fun triggerShieldBash() {
@@ -466,9 +622,16 @@ class GameEngine(
                     stunTimer = 1.1f
                 )
                 spawnFloatingText(enemy.x, enemy.y - 26f, "STUN -${dmg.toInt()}", GoogleGold, isCrit = true)
+                hitSeqCounter++
+                lastHitEnemyId = enemy.id
+                lastHitDamage = dmg
                 if (updated.hp <= 0f) {
-                    eIter.remove()
-                    onEnemyDefeated(updated)
+                    if (isCoopGuest) {
+                        eIter.set(updated.copy(hp = 1f))
+                    } else {
+                        eIter.remove()
+                        onEnemyDefeated(updated)
+                    }
                 } else {
                     eIter.set(updated)
                 }
@@ -483,6 +646,7 @@ class GameEngine(
         )
         spawnParticles(player.x, player.y, GoogleGold, count = 14)
         emitHaptic(HapticEvent.HEAVY_ATTACK)
+        emitSound(SoundEvent.HEAVY_ATTACK)
     }
 
     fun triggerDash(joyX: Float, joyY: Float) {
@@ -502,6 +666,7 @@ class GameEngine(
         )
         spawnParticles(player.x, player.y, GeminiCyan, count = 12)
         emitHaptic(HapticEvent.DASH)
+        emitSound(SoundEvent.DASH)
     }
 
     fun tick(rawDt: Float, joyX: Float, joyY: Float) {
@@ -517,20 +682,232 @@ class GameEngine(
             comboResetTimer = max(0f, comboResetTimer - dt)
         }
 
-        updatePlayer(dt, joyX, joyY)
+        val manualMoveMag = hypot(joyX, joyY)
+        val (effectiveJoyX, effectiveJoyY) = if (isAutopilotEnabled && manualMoveMag <= 0.15f) {
+            computeAutopilotInput(dt)
+        } else {
+            if (isAutopilotEnabled && manualMoveMag > 0.15f) {
+                autopilotStatus = "Manual Override"
+            }
+            joyX to joyY
+        }
+
+        updatePlayer(dt, effectiveJoyX, effectiveJoyY)
         updateAntiVirusGun(dt)
         updateSearchNodes(dt)
-        updateEnemies(dt)
+        if (!isCoopGuest) {
+            updateEnemies(dt)
+        }
         updateProjectiles(dt)
         updateCoins(dt)
         updateItems(dt)
-        itemSpawnTimer -= dt
-        if (itemSpawnTimer <= 0f) {
-            itemSpawnTimer = 11f + Random.nextFloat() * 5f
-            spawnRandomItemInLevel()
+        if (!isCoopGuest) {
+            itemSpawnTimer -= dt
+            if (itemSpawnTimer <= 0f) {
+                itemSpawnTimer = 11f + Random.nextFloat() * 5f
+                spawnRandomItemInLevel()
+            }
         }
         updateEffects(dt)
-        checkWaveProgression(dt)
+        if (!isCoopGuest) {
+            checkWaveProgression(dt)
+        }
+    }
+
+    private fun computeAutopilotInput(dt: Float): Pair<Float, Float> {
+        autopilotGuardTimer = max(0f, autopilotGuardTimer - dt)
+        val hpRatio = player.hp / player.maxHp.coerceAtLeast(1f)
+        var priorityActionStatus: String? = null
+
+        // 1. Evaluate incoming enemy projectiles for reflection, shockwave stun, evasive dash, or shield block
+        val incomingThreat = projectiles
+            .filter { !it.fromPlayer }
+            .mapNotNull { proj ->
+                val toPlayerX = player.x - proj.x
+                val toPlayerY = player.y - proj.y
+                val dist = hypot(toPlayerX, toPlayerY)
+                if (dist > 180f) return@mapNotNull null
+                val pSpeed = hypot(proj.vx, proj.vy).coerceAtLeast(1f)
+                val dot = (toPlayerX / dist.coerceAtLeast(1f)) * (proj.vx / pSpeed) +
+                    (toPlayerY / dist.coerceAtLeast(1f)) * (proj.vy / pSpeed)
+                if (dot > 0.35f) proj to dist else null
+            }
+            .minByOrNull { it.second }
+
+        if (incomingThreat != null) {
+            val (proj, dist) = incomingThreat
+            val angleToProj = atan2(proj.y - player.y, proj.x - player.x)
+            val closeEnemiesCount = enemies.count { hypot(it.x - player.x, it.y - player.y) <= 155f }
+            if (dist <= 122f && player.slashCooldown <= 0f) {
+                priorityActionStatus = "Reflecting Fire"
+                autopilotStatus = priorityActionStatus
+                triggerSwordSlash(angleToProj)
+            } else if ((dist <= 135f || closeEnemiesCount >= 2) && player.shieldBashCooldown <= 0f) {
+                priorityActionStatus = "Shockwave Stun"
+                autopilotStatus = priorityActionStatus
+                triggerShieldBash()
+            } else if (dist <= 90f && player.dashCooldown <= 0f && player.adBlockBubbleTimer <= 0f) {
+                autopilotStatus = "Evasive Dash"
+                val perpX = -proj.vy
+                val perpY = proj.vx
+                triggerDash(perpX, perpY)
+                return steerTowardDelta(perpX, perpY)
+            } else if (dist <= 110f && player.shieldStamina > 25f && player.adBlockBubbleTimer <= 0f) {
+                autopilotGuardTimer = 0.35f
+                setGuarding(true)
+                priorityActionStatus = "Shield Guard"
+                autopilotStatus = priorityActionStatus
+            }
+        } else if (player.isGuarding && autopilotGuardTimer <= 0f) {
+            setGuarding(false)
+        }
+
+        // 2. Survival Repair Pack check
+        val repairThreshold = when (autopilotStance) {
+            AutopilotStance.AGGRESSIVE -> 0.40f
+            AutopilotStance.BALANCED -> 0.62f
+            AutopilotStance.OBJECTIVE -> 0.78f
+        }
+        val repairPack = if (hpRatio < repairThreshold) {
+            items.filter { it.type == ItemUpgradeType.HEALTH_PACK }
+                .minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+        } else null
+        if (repairPack != null) {
+            focusedEnemyId = null
+            autopilotStatus = priorityActionStatus ?: "Seeking Repair"
+            return steerTowardDelta(repairPack.x - player.x, repairPack.y - player.y)
+        }
+
+        // 3. Nearby buff item collection
+        val itemRadius = when (autopilotStance) {
+            AutopilotStance.AGGRESSIVE -> 210f
+            AutopilotStance.BALANCED -> 290f
+            AutopilotStance.OBJECTIVE -> 420f
+        }
+        val nearestEnemyDist = enemies.minOfOrNull { hypot(it.x - player.x, it.y - player.y) } ?: Float.MAX_VALUE
+        val nearbyItem = items
+            .filter { hypot(it.x - player.x, it.y - player.y) <= itemRadius }
+            .minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+        if (nearbyItem != null && nearestEnemyDist > 92f) {
+            focusedEnemyId = null
+            autopilotStatus = priorityActionStatus ?: "Grabbing ${nearbyItem.type.label}"
+            return steerTowardDelta(nearbyItem.x - player.x, nearbyItem.y - player.y)
+        }
+
+        // 4. Search Node objective indexing
+        val nearestNode = searchNodes
+            .filter { !it.indexed }
+            .minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+        val shouldPrioritizeNode = nearestNode != null && when (autopilotStance) {
+            AutopilotStance.OBJECTIVE -> nearestEnemyDist > 88f || hypot(nearestNode.x - player.x, nearestNode.y - player.y) < 125f
+            AutopilotStance.BALANCED -> hpRatio > 0.35f &&
+                (nearestEnemyDist > 140f || hypot(nearestNode.x - player.x, nearestNode.y - player.y) < 115f)
+            AutopilotStance.AGGRESSIVE -> enemies.isEmpty()
+        }
+        if (shouldPrioritizeNode && nearestNode != null) {
+            focusedEnemyId = null
+            val dx = nearestNode.x - player.x
+            val dy = nearestNode.y - player.y
+            val dist = hypot(dx, dy)
+            autopilotStatus = priorityActionStatus ?: "Indexing ${nearestNode.label}"
+            // If an enemy steps into melee range while indexing, slash without stepping off node
+            val closeEnemy = enemies.minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+            if (closeEnemy != null && hypot(closeEnemy.x - player.x, closeEnemy.y - player.y) <= 135f && player.slashCooldown <= 0f) {
+                triggerSwordSlash(atan2(closeEnemy.y - player.y, closeEnemy.x - player.x))
+            }
+            return if (dist > 34f) steerTowardDelta(dx, dy) else 0f to 0f
+        }
+
+        // 5. Combat target acquisition & engagement
+        val targetEnemy = when (autopilotStance) {
+            AutopilotStance.AGGRESSIVE -> {
+                enemies.firstOrNull { it.type == EnemyType.SECTOR_BOSS && hypot(it.x - player.x, it.y - player.y) < 280f }
+                    ?: enemies.minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+            }
+            else -> enemies.minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+        }
+
+        if (targetEnemy != null) {
+            focusedEnemyId = targetEnemy.id
+            val dx = targetEnemy.x - player.x
+            val dy = targetEnemy.y - player.y
+            val dist = hypot(dx, dy)
+            val angleToEnemy = atan2(dy, dx)
+            val meleeReach = 122f + targetEnemy.type.radius * 0.45f
+
+            val enemiesInBashRange = enemies.count { hypot(it.x - player.x, it.y - player.y) <= 160f }
+            if ((enemiesInBashRange >= 2 || (targetEnemy.type == EnemyType.SECTOR_BOSS && dist <= 150f)) &&
+                player.shieldBashCooldown <= 0f
+            ) {
+                autopilotStatus = priorityActionStatus ?: "Shield Bash Crowd"
+                triggerShieldBash()
+            }
+
+            if (dist <= meleeReach) {
+                if (player.slashCooldown <= 0f) {
+                    autopilotStatus = priorityActionStatus ?: if (targetEnemy.type == EnemyType.SECTOR_BOSS) {
+                        "Attacking ${sector.bossName}"
+                    } else {
+                        "Engaging ${targetEnemy.type.displayName}"
+                    }
+                    triggerSwordSlash(angleToEnemy)
+                } else if (priorityActionStatus != null) {
+                    autopilotStatus = priorityActionStatus
+                }
+                // Kite slightly back in OBJECTIVE stance when low HP while waiting on cooldown
+                if (autopilotStance == AutopilotStance.OBJECTIVE && hpRatio < 0.45f && dist < 85f) {
+                    autopilotStatus = priorityActionStatus ?: "Kiting Threat"
+                    return steerTowardDelta(-dx, -dy)
+                }
+                return 0f to 0f
+            } else {
+                autopilotStatus = priorityActionStatus ?: if (targetEnemy.type == EnemyType.SECTOR_BOSS) {
+                    "Pursuing ${sector.bossName}"
+                } else {
+                    "Hunting ${targetEnemy.type.displayName}"
+                }
+                if (autopilotStance == AutopilotStance.AGGRESSIVE &&
+                    dist in 185f..360f &&
+                    hpRatio > 0.55f &&
+                    player.dashCooldown <= 0f &&
+                    !hitsTetrisObstacle(player.x + dx * 0.35f, player.y + dy * 0.35f, 22f)
+                ) {
+                    triggerDash(dx, dy)
+                }
+                return steerTowardDelta(dx, dy)
+            }
+        }
+
+        // 6. Sweep remaining dropped coins between waves
+        focusedEnemyId = null
+        val nearestCoin = coins.minByOrNull { hypot(it.x - player.x, it.y - player.y) }
+        if (nearestCoin != null) {
+            autopilotStatus = priorityActionStatus ?: "Collecting Coins"
+            return steerTowardDelta(nearestCoin.x - player.x, nearestCoin.y - player.y)
+        }
+
+        autopilotStatus = priorityActionStatus ?: "Patrolling Arena"
+        return 0f to 0f
+    }
+
+    private fun steerTowardDelta(dx: Float, dy: Float): Pair<Float, Float> {
+        val dist = hypot(dx, dy)
+        if (dist < 1f) return 0f to 0f
+        val baseAngle = atan2(dy, dx)
+        val probeDist = 46f
+        val candidateOffsets = floatArrayOf(0f, 0.55f, -0.55f, 1.15f, -1.15f, 1.75f, -1.75f, 2.35f, -2.35f)
+        for (offset in candidateOffsets) {
+            val angle = baseAngle + offset
+            val tx = player.x + cos(angle) * probeDist
+            val ty = player.y + sin(angle) * probeDist
+            if (tx > -worldHalfWidth + 28f && tx < worldHalfWidth - 28f &&
+                ty > -worldHalfHeight + 28f && ty < worldHalfHeight - 28f &&
+                !hitsTetrisObstacle(tx, ty, 22f)
+            ) {
+                return cos(angle) to sin(angle)
+            }
+        }
+        return (dx / dist) to (dy / dist)
     }
 
     private fun updateAntiVirusGun(dt: Float) {
@@ -614,6 +991,7 @@ class GameEngine(
                 focusedEnemyId = null
             }
 
+            var autoAttackAngle: Float? = null
             if (mag <= 0.08f && focused != null) {
                 val dx = focused.x - p.x
                 val dy = focused.y - p.y
@@ -624,12 +1002,12 @@ class GameEngine(
                     dirY = sin(angleToTarget)
                     mag = 1f
                 } else {
-                    // Within melee range: face target and auto-attack!
+                    // Within melee range: face target and trigger auto-attack after state update
                     dirX = 0f
                     dirY = 0f
                     mag = 0f
-                    if (p.slashCooldown <= 0f) {
-                        triggerSwordSlash(angleToTarget)
+                    if (newSlashCd <= 0f) {
+                        autoAttackAngle = angleToTarget
                     }
                 }
             } else if (mag <= 0.08f && moveTargetX != null && moveTargetY != null) {
@@ -661,6 +1039,32 @@ class GameEngine(
             val (resolvedX, resolvedY) = resolveTetrisCollisions(rawNx, rawNy, 20f)
             nx = resolvedX
             ny = resolvedY
+
+            player = p.copy(
+                x = nx,
+                y = ny,
+                vx = nvx,
+                vy = nvy,
+                facingAngle = nAngle,
+                isGuarding = guarding,
+                shieldStamina = stamina,
+                slashCooldown = newSlashCd,
+                slashActiveTimer = newSlashActive,
+                shieldBashCooldown = newBashCd,
+                dashCooldown = newDashCd,
+                dashActiveTimer = max(0f, p.dashActiveTimer - dt),
+                invulnTimer = newInvuln,
+                hitFlashTimer = newHitFlash,
+                walkPhase = walkPhase,
+                antiVirusGunTimer = max(0f, p.antiVirusGunTimer - dt),
+                adBlockBubbleTimer = max(0f, p.adBlockBubbleTimer - dt),
+                speedUpTimer = max(0f, p.speedUpTimer - dt),
+                attackMultTimer = max(0f, p.attackMultTimer - dt)
+            )
+            if (autoAttackAngle != null) {
+                triggerSwordSlash(autoAttackAngle)
+            }
+            return
         }
 
         player = p.copy(
@@ -729,8 +1133,22 @@ class GameEngine(
                 continue
             }
 
-            val dx = player.x - e.x
-            val dy = player.y - e.y
+            // Target nearest alive hero (local player or remote co-op teammates)
+            var targetX = player.x
+            var targetY = player.y
+            var bestDist = if (player.hp > 0f) hypot(player.x - e.x, player.y - e.y) else Float.MAX_VALUE
+            for (rp in remotePlayers) {
+                if (rp.isAlive) {
+                    val d = hypot(rp.x - e.x, rp.y - e.y)
+                    if (d < bestDist) {
+                        bestDist = d
+                        targetX = rp.x
+                        targetY = rp.y
+                    }
+                }
+            }
+            val dx = targetX - e.x
+            val dy = targetY - e.y
             val dist = max(1f, hypot(dx, dy))
             val dirX = dx / dist
             val dirY = dy / dist
@@ -897,9 +1315,16 @@ class GameEngine(
                         val updated = enemy.copy(hp = enemy.hp - dmg, hitFlashTimer = 0.14f)
                         spawnFloatingText(enemy.x, enemy.y - 22f, "-${dmg.toInt()}", GeminiCyan)
                         spawnParticles(nx, ny, enemy.type.color, count = 5)
+                        hitSeqCounter++
+                        lastHitEnemyId = enemy.id
+                        lastHitDamage = dmg
                         if (updated.hp <= 0f) {
-                            eIter.remove()
-                            onEnemyDefeated(updated)
+                            if (isCoopGuest) {
+                                eIter.set(updated.copy(hp = 1f))
+                            } else {
+                                eIter.remove()
+                                onEnemyDefeated(updated)
+                            }
                         } else {
                             eIter.set(updated)
                         }
@@ -932,6 +1357,7 @@ class GameEngine(
             spawnFloatingText(player.x, player.y - 36f, "AD-BLOCKED!", GeminiCyan, isCrit = true)
             spawnParticles(player.x, player.y, GeminiCyan, count = 6)
             emitHaptic(HapticEvent.SHIELD_BLOCK)
+            emitSound(SoundEvent.SHIELD_BLOCK)
             return
         }
 
@@ -953,6 +1379,7 @@ class GameEngine(
                 count = 8
             )
             emitHaptic(HapticEvent.SHIELD_BLOCK)
+            emitSound(SoundEvent.SHIELD_BLOCK)
             return
         }
 
@@ -964,6 +1391,7 @@ class GameEngine(
         )
         spawnFloatingText(player.x, player.y - 28f, "-${mitigated.toInt()}", VirusCrimson)
         emitHaptic(HapticEvent.DAMAGE_TAKEN)
+        emitSound(SoundEvent.DAMAGE_TAKEN)
         if (newHp <= 0f) {
             endMission(victory = false)
         }
@@ -1031,6 +1459,7 @@ class GameEngine(
                 coinsCollected += coin.value
                 spawnFloatingText(player.x, player.y - 34f, "+${coin.value}G", GoogleGold)
                 emitHaptic(HapticEvent.ITEM_COLLECTED)
+                emitSound(SoundEvent.ITEM_COLLECTED)
                 cIter.remove()
             } else {
                 cIter.set(
@@ -1067,6 +1496,7 @@ class GameEngine(
                 spawnFloatingText(player.x, player.y - 42f, item.type.label, item.type.color, isCrit = true)
                 spawnParticles(item.x, item.y, item.type.color, count = 12)
                 emitHaptic(HapticEvent.ITEM_COLLECTED)
+                emitSound(SoundEvent.ITEM_COLLECTED)
                 iter.remove()
             } else {
                 iter.set(item.copy(z = z, vz = vz, bobPhase = item.bobPhase + dt * 4f))
@@ -1096,7 +1526,8 @@ class GameEngine(
                 }
             }
         }
-        return rx to ry
+        return rx.coerceIn(-worldHalfWidth + radius, worldHalfWidth - radius) to
+            ry.coerceIn(-worldHalfHeight + radius, worldHalfHeight - radius)
     }
 
     private fun hitsTetrisObstacle(wx: Float, wy: Float, radius: Float): Boolean {
@@ -1257,7 +1688,10 @@ class GameEngine(
             hasAdBlockBubble = player.adBlockBubbleTimer > 0f,
             hasSpeedUp = player.speedUpTimer > 0f,
             hasAttackMultiplier = player.attackMultTimer > 0f,
-            bannerMessage = bannerMessage
+            bannerMessage = bannerMessage,
+            isAutopilotEnabled = isAutopilotEnabled,
+            autopilotStance = autopilotStance,
+            autopilotStatus = autopilotStatus
         )
     }
 }

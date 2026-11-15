@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarOutline
 import androidx.compose.material3.Button
@@ -68,13 +69,42 @@ import androidx.compose.ui.unit.dp
 import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.MusicOff
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.window.Dialog
+import com.example.ai.GeminiChatMessage
+import com.example.ai.GeminiChatUiState
+import com.example.ai.InGameDialogTrigger
+import com.example.audio.ClassicalTechnoTracks
+import kotlinx.coroutines.delay
+import com.example.audio.SoundEffectManager
 import com.example.data.PlayerProgress
 import com.example.game.ArenaHudState
 import com.example.game.ArenaTouchController
+import com.example.game.AutopilotStance
 import com.example.game.GameEngine
 import com.example.game.HapticEvent
 import com.example.game.SectorDefinition
 import com.example.game.arenaTouchController
+import com.example.multiplayer.CoopMode
+import com.example.multiplayer.CoopRoomStatus
+import com.example.multiplayer.CoopSessionState
+import com.example.multiplayer.CoopWorldSnapshot
 import com.example.ui.components.AbilityButton
 import com.example.ui.components.GeminiCharacterEmblem
 import com.example.ui.components.HoldableGuardButton
@@ -97,7 +127,43 @@ fun ArenaScreen(
     sector: SectorDefinition,
     progress: PlayerProgress,
     hasNextStage: Boolean,
+    isCoop: Boolean = false,
+    coopSession: CoopSessionState = CoopSessionState(),
+    arenaCoachState: GeminiChatUiState = GeminiChatUiState.Idle,
+    inGameDialogState: GeminiChatUiState = GeminiChatUiState.Idle,
+    inGameDialogVisible: Boolean = false,
+    inGameDialogHistory: List<GeminiChatMessage> = emptyList(),
+    onTriggerInGameDialog: (
+        trigger: InGameDialogTrigger,
+        hpPercent: Int,
+        wave: Int,
+        nodesIndexed: Int,
+        totalNodes: Int,
+        bossName: String?,
+        customQuestion: String?
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
+    onDismissInGameDialog: () -> Unit = {},
+    onAskArenaCoach: (hpPercent: Int, wave: Int) -> Unit = { _, _ -> },
+    onPublishLocalPlayerState: (
+        x: Float,
+        y: Float,
+        facingAngle: Float,
+        hp: Float,
+        maxHp: Float,
+        isGuarding: Boolean,
+        isSlashing: Boolean,
+        slashComboStep: Int,
+        walkPhase: Float,
+        hitSeq: Long,
+        lastHitEnemyId: Int,
+        lastHitDamage: Float
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
+    onPublishHostWorldState: (CoopWorldSnapshot, CoopRoomStatus) -> Unit = { _, _ -> },
     onToggleHandedness: (Boolean) -> Unit,
+    onToggleMusic: (Boolean) -> Unit = {},
+    onCycleMusicTrack: () -> Unit = {},
+    onMusicDuckChanged: (Boolean) -> Unit = {},
+    onBossStateChanged: (Boolean) -> Unit = {},
     onNextStage: () -> Unit,
     onMissionComplete: (
         coinsEarned: Int,
@@ -111,14 +177,24 @@ fun ArenaScreen(
     onExitToHub: () -> Unit
 ) {
     var sessionKey by remember { mutableLongStateOf(0L) }
-    val engine = remember(sector.id, sessionKey) { GameEngine(sector, progress) }
+    val engine = remember(sector.id, sessionKey, isCoop, coopSession.isHost) {
+        GameEngine(sector, progress).apply {
+            isCoopGuest = isCoop && !coopSession.isHost
+        }
+    }
     val touchController = remember(engine) { ArenaTouchController(engine) }
     var hudState by remember(sector.id, sessionKey) { mutableStateOf(engine.snapshotHud()) }
     var frameTick by remember { mutableLongStateOf(0L) }
     var recordedResult by remember(sector.id, sessionKey) { mutableStateOf(false) }
+    var showGeminiDialogModal by remember(sector.id, sessionKey) { mutableStateOf(false) }
+    var lowHpWarned by remember(sector.id, sessionKey) { mutableStateOf(false) }
 
     BackHandler {
-        if (!hudState.isMissionOver) {
+        if (showGeminiDialogModal) {
+            showGeminiDialogModal = false
+            engine.isPaused = false
+            hudState = engine.snapshotHud()
+        } else if (!hudState.isMissionOver) {
             engine.isPaused = !engine.isPaused
             hudState = engine.snapshotHud()
         } else {
@@ -127,40 +203,200 @@ fun ArenaScreen(
     }
 
     val view = LocalView.current
+    val soundManager = remember { SoundEffectManager() }
+    val processedHitSeqByUid = remember(sessionKey) { mutableMapOf<String, Long>() }
 
-    LaunchedEffect(engine) {
+    LaunchedEffect(progress.soundEnabled) {
+        soundManager.enabled = progress.soundEnabled
+    }
+
+    LaunchedEffect(hudState.isPaused, hudState.isMissionOver, showGeminiDialogModal) {
+        onMusicDuckChanged(hudState.isPaused || hudState.isMissionOver || showGeminiDialogModal)
+    }
+
+    val isBossActive = !hudState.isMissionOver && hudState.bossName != null && (hudState.bossHp ?: 0f) > 0f
+    LaunchedEffect(isBossActive) {
+        onBossStateChanged(isBossActive)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onBossStateChanged(false) }
+    }
+
+    // Automatic Event-Driven Gemini AI Companion Dialogs during battle
+    val currentHpPercent = ((hudState.hp / hudState.maxHp.coerceAtLeast(1f)) * 100f).toInt().coerceIn(0, 100)
+    LaunchedEffect(sector.id, sessionKey) {
+        onTriggerInGameDialog(
+            InGameDialogTrigger.STAGE_ENTRY,
+            100,
+            1,
+            0,
+            sector.waves,
+            null,
+            null
+        )
+    }
+
+    LaunchedEffect(hudState.wave, sector.id, sessionKey) {
+        if (hudState.wave > 1 && !hudState.isMissionOver) {
+            onTriggerInGameDialog(
+                InGameDialogTrigger.WAVE_ADVANCE,
+                currentHpPercent,
+                hudState.wave,
+                hudState.nodesIndexed,
+                hudState.totalNodes,
+                hudState.bossName,
+                null
+            )
+        }
+    }
+
+    LaunchedEffect(hudState.bossName != null, sector.id, sessionKey) {
+        val bName = hudState.bossName
+        if (bName != null && !hudState.isMissionOver) {
+            onTriggerInGameDialog(
+                InGameDialogTrigger.BOSS_SPAWN,
+                currentHpPercent,
+                hudState.wave,
+                hudState.nodesIndexed,
+                hudState.totalNodes,
+                bName,
+                null
+            )
+        }
+    }
+
+    LaunchedEffect(currentHpPercent <= 35, sector.id, sessionKey) {
+        if (currentHpPercent in 1..35 && !lowHpWarned && !hudState.isMissionOver) {
+            lowHpWarned = true
+            onTriggerInGameDialog(
+                InGameDialogTrigger.LOW_HP,
+                currentHpPercent,
+                hudState.wave,
+                hudState.nodesIndexed,
+                hudState.totalNodes,
+                hudState.bossName,
+                null
+            )
+        }
+    }
+
+    LaunchedEffect(inGameDialogState, inGameDialogVisible, showGeminiDialogModal) {
+        if (inGameDialogVisible && !showGeminiDialogModal) {
+            when (inGameDialogState) {
+                is GeminiChatUiState.Success -> {
+                    delay(9_500L)
+                    onDismissInGameDialog()
+                }
+                is GeminiChatUiState.Error -> {
+                    delay(10_000L)
+                    onDismissInGameDialog()
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    LaunchedEffect(isCoop, coopSession.remotePlayers, coopSession.hostWorldSnapshot) {
+        if (isCoop) {
+            engine.updateRemotePlayers(coopSession.remotePlayers)
+            if (coopSession.isHost) {
+                coopSession.remotePlayers.forEach { rp ->
+                    val prevSeq = processedHitSeqByUid[rp.uid] ?: 0L
+                    if (rp.hitSeq > prevSeq) {
+                        processedHitSeqByUid[rp.uid] = rp.hitSeq
+                        engine.applyRemotePlayerHit(rp.lastHitEnemyId, rp.lastHitDamage)
+                    }
+                }
+            } else {
+                coopSession.hostWorldSnapshot?.let { snap ->
+                    engine.applyHostWorldSnapshot(snap)
+                }
+            }
+        }
+    }
+
+    DisposableEffect(soundManager) {
+        onDispose { soundManager.release() }
+    }
+
+    val latestCoopSession by rememberUpdatedState(coopSession)
+    val latestOnPublishLocalPlayerState by rememberUpdatedState(onPublishLocalPlayerState)
+    val latestOnPublishHostWorldState by rememberUpdatedState(onPublishHostWorldState)
+
+    LaunchedEffect(engine, progress.hapticsEnabled, isCoop) {
         var lastNanos = 0L
+        var lastSyncNanos = 0L
+        var lastReportedHitSeq = 0L
+
         while (true) {
             withFrameNanos { nanos ->
+                val activeSession = latestCoopSession
+                val syncIntervalNanos = if (activeSession.mode == CoopMode.LOCAL_LAN) 55_000_000L else 110_000_000L
                 if (lastNanos == 0L) lastNanos = nanos
                 val dt = (nanos - lastNanos) / 1_000_000_000f
                 lastNanos = nanos
 
                 engine.tick(dt, touchController.dpadInput.x, touchController.dpadInput.y)
                 val haptics = engine.drainHapticEvents()
-                for (event in haptics) {
-                    val flag = when (event) {
-                        HapticEvent.LIGHT_ATTACK -> HapticFeedbackConstants.KEYBOARD_TAP
-                        HapticEvent.HEAVY_ATTACK -> HapticFeedbackConstants.LONG_PRESS
-                        HapticEvent.DAMAGE_TAKEN -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            HapticFeedbackConstants.REJECT
-                        } else {
-                            HapticFeedbackConstants.LONG_PRESS
+                if (progress.hapticsEnabled) {
+                    for (event in haptics) {
+                        val flag = when (event) {
+                            HapticEvent.LIGHT_ATTACK -> HapticFeedbackConstants.KEYBOARD_TAP
+                            HapticEvent.HEAVY_ATTACK -> HapticFeedbackConstants.LONG_PRESS
+                            HapticEvent.DAMAGE_TAKEN -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                HapticFeedbackConstants.REJECT
+                            } else {
+                                HapticFeedbackConstants.LONG_PRESS
+                            }
+                            HapticEvent.SHIELD_BLOCK -> HapticFeedbackConstants.CONTEXT_CLICK
+                            HapticEvent.ITEM_COLLECTED -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                HapticFeedbackConstants.CONFIRM
+                            } else {
+                                HapticFeedbackConstants.KEYBOARD_TAP
+                            }
+                            HapticEvent.DASH -> HapticFeedbackConstants.VIRTUAL_KEY
                         }
-                        HapticEvent.SHIELD_BLOCK -> HapticFeedbackConstants.CONTEXT_CLICK
-                        HapticEvent.ITEM_COLLECTED -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            HapticFeedbackConstants.CONFIRM
-                        } else {
-                            HapticFeedbackConstants.KEYBOARD_TAP
-                        }
-                        HapticEvent.DASH -> HapticFeedbackConstants.VIRTUAL_KEY
+                        view.performHapticFeedback(flag)
                     }
-                    view.performHapticFeedback(flag)
+                }
+
+                val sounds = engine.drainSoundEvents()
+                for (sound in sounds) {
+                    soundManager.play(sound)
                 }
 
                 val snap = engine.snapshotHud()
                 hudState = snap
                 frameTick++
+
+                val activeCoop = latestCoopSession
+                if (isCoop && activeCoop.isActive) {
+                    val hitChanged = engine.hitSeqCounter > lastReportedHitSeq
+                    val intervalElapsed = nanos - lastSyncNanos >= syncIntervalNanos
+                    if (hitChanged || intervalElapsed || (snap.isMissionOver && !recordedResult)) {
+                        lastSyncNanos = nanos
+                        lastReportedHitSeq = engine.hitSeqCounter
+                        val p = engine.player
+                        latestOnPublishLocalPlayerState(
+                            p.x,
+                            p.y,
+                            p.facingAngle,
+                            p.hp,
+                            p.maxHp,
+                            p.isGuarding,
+                            p.slashActiveTimer > 0f,
+                            p.slashComboStep,
+                            p.walkPhase,
+                            engine.hitSeqCounter,
+                            engine.lastHitEnemyId,
+                            engine.lastHitDamage
+                        )
+                        if (activeCoop.isHost) {
+                            val status = if (snap.isMissionOver) CoopRoomStatus.FINISHED else CoopRoomStatus.PLAYING
+                            latestOnPublishHostWorldState(engine.exportWorldSnapshot(), status)
+                        }
+                    }
+                }
 
                 if (snap.isMissionOver && !recordedResult) {
                     recordedResult = true
@@ -294,7 +530,7 @@ fun ArenaScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
                 // Handedness Toggle (R / L)
                 Surface(
@@ -316,7 +552,45 @@ fun ArenaScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+
+                // Live Gemini AI In-Game Comms Button
+                IconButton(
+                    onClick = {
+                        engine.isPaused = true
+                        hudState = engine.snapshotHud()
+                        showGeminiDialogModal = true
+                        if (inGameDialogState is GeminiChatUiState.Idle) {
+                            onTriggerInGameDialog(
+                                InGameDialogTrigger.MANUAL_CALLOUT,
+                                currentHpPercent,
+                                hudState.wave,
+                                hudState.nodesIndexed,
+                                hudState.totalNodes,
+                                hudState.bossName,
+                                null
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.linearGradient(
+                                colors = listOf(GeminiBlue.copy(alpha = 0.85f), GoogleGreen.copy(alpha = 0.85f))
+                            )
+                        )
+                        .border(1.dp, GoogleGold.copy(alpha = 0.85f), CircleShape)
+                        .testTag("arena_gemini_dialog_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = "Ask Gemini AI In-Game",
+                        tint = Color.White
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
 
                 // Pause / Menu Button
                 IconButton(
@@ -377,14 +651,147 @@ fun ArenaScreen(
                 }
             }
 
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // AI Autopilot Control Strip (one-tap toggle & stance selector)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    onClick = {
+                        engine.setAutopilot(!hudState.isAutopilotEnabled)
+                        hudState = engine.snapshotHud()
+                    },
+                    color = if (hudState.isAutopilotEnabled) {
+                        GoogleGreen.copy(alpha = 0.24f)
+                    } else {
+                        CyberSurface.copy(alpha = 0.82f)
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(
+                        width = 1.25.dp,
+                        color = if (hudState.isAutopilotEnabled) GoogleGreen else CyberSurfaceBorder
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("arena_autopilot_button")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SmartToy,
+                            contentDescription = if (hudState.isAutopilotEnabled) {
+                                "Disable AI Autopilot"
+                            } else {
+                                "Enable AI Autopilot"
+                            },
+                            tint = if (hudState.isAutopilotEnabled) GoogleGreen else TextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (hudState.isAutopilotEnabled) {
+                                "AUTOPILOT ON • ${hudState.autopilotStatus}"
+                            } else {
+                                "AI AUTOPILOT: OFF (TAP TO AUTO-PLAY)"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (hudState.isAutopilotEnabled) Color.White else TextSecondary,
+                            fontWeight = if (hudState.isAutopilotEnabled) FontWeight.Bold else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                if (hudState.isAutopilotEnabled) {
+                    Surface(
+                        onClick = {
+                            engine.cycleAutopilotStance()
+                            hudState = engine.snapshotHud()
+                        },
+                        color = CyberSurfaceElevated.copy(alpha = 0.9f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, GoogleGold.copy(alpha = 0.85f)),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("arena_autopilot_stance_button")
+                    ) {
+                        Box(
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = hudState.autopilotStance.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = GoogleGold,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
             // Active Grabbed Item Buffs Row
             if (hudState.hasAntiVirusGun || hudState.hasAdBlockBubble || hudState.hasSpeedUp || hudState.hasAttackMultiplier) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (hudState.hasAntiVirusGun) BuffChip("AUTO-GUN", GoogleGreen)
                     if (hudState.hasAdBlockBubble) BuffChip("AD-BLOCK", GeminiCyan)
-                    if (hudState.hasSpeedUp) BuffChip("SPEED+", com.example.ui.theme.GeminiBlue)
+                    if (hudState.hasSpeedUp) BuffChip("SPEED+", GeminiBlue)
                     if (hudState.hasAttackMultiplier) BuffChip("2X ATK", GoogleGold)
+                }
+            }
+
+            // 4-Player Co-Op Squad Bar
+            if (isCoop && coopSession.remotePlayers.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    coopSession.remotePlayers.take(3).forEach { rp ->
+                        val slotColor = when (rp.colorIndex.mod(4)) {
+                            0 -> GeminiBlue
+                            1 -> VirusCrimson
+                            2 -> GoogleGold
+                            else -> GoogleGreen
+                        }
+                        Surface(
+                            color = CyberSurface.copy(alpha = 0.85f),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, slotColor.copy(alpha = 0.8f)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                Text(
+                                    text = rp.displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = slotColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                LinearProgressIndicator(
+                                    progress = { (rp.hp / rp.maxHp.coerceAtLeast(1f)).coerceIn(0f, 1f) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .clip(CircleShape),
+                                    color = if (rp.isAlive) GoogleGreen else VirusCrimson,
+                                    trackColor = DeepWebVoid
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -437,6 +844,38 @@ fun ArenaScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
                     )
                 }
+            }
+
+            // Live In-Game Gemini AI Companion Dialog Banner (non-blocking during gameplay)
+            AnimatedVisibility(
+                visible = inGameDialogVisible && !hudState.isMissionOver && !showGeminiDialogModal && inGameDialogState !is GeminiChatUiState.Idle,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(top = 8.dp)
+            ) {
+                InGameGeminiDialogBubble(
+                    dialogState = inGameDialogState,
+                    highContrast = progress.highContrast,
+                    onAskFollowUp = {
+                        engine.isPaused = true
+                        hudState = engine.snapshotHud()
+                        showGeminiDialogModal = true
+                    },
+                    onRetry = {
+                        onTriggerInGameDialog(
+                            InGameDialogTrigger.MANUAL_CALLOUT,
+                            currentHpPercent,
+                            hudState.wave,
+                            hudState.nodesIndexed,
+                            hudState.totalNodes,
+                            hudState.bossName,
+                            null
+                        )
+                    },
+                    onDismiss = onDismissInGameDialog
+                )
             }
         }
 
@@ -557,7 +996,7 @@ fun ArenaScreen(
         }
 
         // Pause Overlay
-        if (hudState.isPaused && !hudState.isMissionOver) {
+        if (hudState.isPaused && !hudState.isMissionOver && !showGeminiDialogModal) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -588,7 +1027,169 @@ fun ArenaScreen(
                             style = MaterialTheme.typography.bodyLarge,
                             color = TextSecondary
                         )
-                        Spacer(modifier = Modifier.height(22.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // AI Autopilot Toggle inside Pause Menu
+                        OutlinedButton(
+                            onClick = {
+                                engine.setAutopilot(!hudState.isAutopilotEnabled)
+                                hudState = engine.snapshotHud()
+                            },
+                            border = BorderStroke(
+                                1.dp,
+                                if (hudState.isAutopilotEnabled) GoogleGreen else GeminiCyan
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("pause_autopilot_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.SmartToy,
+                                contentDescription = null,
+                                tint = if (hudState.isAutopilotEnabled) GoogleGreen else GeminiCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (hudState.isAutopilotEnabled) {
+                                    "AI AUTOPILOT: ON (${hudState.autopilotStance.label})"
+                                } else {
+                                    "ENABLE AI AUTOPILOT"
+                                },
+                                color = if (hudState.isAutopilotEnabled) GoogleGreen else GeminiCyan,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Classical Techno Soundtrack Controls inside Pause Menu
+                        val resolvedTrack = ClassicalTechnoTracks.resolveTrack(
+                            trackId = progress.selectedMusicTrackId,
+                            sectorId = sector.id,
+                            isBossFight = isBossActive
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { onToggleMusic(!progress.musicEnabled) },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (progress.musicEnabled) {
+                                        if (resolvedTrack.isBossTrack) VirusCrimson else GeminiBlue
+                                    } else CyberSurfaceBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("pause_music_toggle_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (progress.musicEnabled) Icons.Rounded.MusicNote else Icons.Rounded.MusicOff,
+                                    contentDescription = if (progress.musicEnabled) "Mute Music" else "Enable Music",
+                                    tint = if (progress.musicEnabled) {
+                                        if (resolvedTrack.isBossTrack) VirusCrimson else GeminiCyan
+                                    } else TextSecondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (progress.musicEnabled) "MUSIC ON" else "MUSIC OFF",
+                                    color = if (progress.musicEnabled) {
+                                        if (resolvedTrack.isBossTrack) VirusCrimson else GeminiCyan
+                                    } else TextSecondary,
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = onCycleMusicTrack,
+                                border = BorderStroke(1.dp, if (resolvedTrack.isBossTrack) VirusCrimson else GeminiBlue),
+                                modifier = Modifier
+                                    .weight(1.3f)
+                                    .height(48.dp)
+                                    .testTag("pause_music_cycle_button")
+                            ) {
+                                Text(
+                                    text = if (progress.selectedMusicTrackId == ClassicalTechnoTracks.AUTO_TRACK_ID) {
+                                        if (resolvedTrack.isBossTrack) "BOSS: ${resolvedTrack.title}" else "AUTO: ${resolvedTrack.composer}"
+                                    } else {
+                                        resolvedTrack.title
+                                    },
+                                    color = if (resolvedTrack.isBossTrack) VirusCrimson else TextPrimary,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Live Gemini AI Tactical Coach inside Pause Menu
+                        val hpPct = ((hudState.hp / hudState.maxHp.coerceAtLeast(1f)) * 100f).toInt().coerceIn(0, 100)
+                        OutlinedButton(
+                            onClick = { onAskArenaCoach(hpPct, hudState.wave) },
+                            enabled = arenaCoachState !is GeminiChatUiState.Loading,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, GoogleGold),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("ask_gemini_coach_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AutoAwesome,
+                                contentDescription = null,
+                                tint = GoogleGold,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (arenaCoachState is GeminiChatUiState.Loading) "CONSULTING GEMINI..." else "ASK GEMINI COACH",
+                                color = GoogleGold,
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+
+                        when (arenaCoachState) {
+                            is GeminiChatUiState.Success -> {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Surface(
+                                    color = CyberSurface,
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, GeminiCyan.copy(alpha = 0.5f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = arenaCoachState.text,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextPrimary,
+                                        modifier = Modifier.padding(10.dp)
+                                    )
+                                }
+                            }
+                            is GeminiChatUiState.Error -> {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Surface(
+                                    color = VirusCrimson.copy(alpha = 0.14f),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, VirusCrimson),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = arenaCoachState.message,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = VirusCrimson,
+                                        modifier = Modifier.padding(10.dp)
+                                    )
+                                }
+                            }
+                            else -> Unit
+                        }
+
+                        Spacer(modifier = Modifier.height(18.dp))
                         Button(
                             onClick = {
                                 engine.isPaused = false
@@ -615,6 +1216,47 @@ fun ArenaScreen(
                     }
                 }
             }
+        }
+
+        // Interactive In-Game Gemini AI Tactical Dialog Modal (Pause-Safe)
+        if (showGeminiDialogModal && !hudState.isMissionOver) {
+            InGameGeminiTacticalModal(
+                sector = sector,
+                hpPercent = currentHpPercent,
+                wave = hudState.wave,
+                nodesIndexed = hudState.nodesIndexed,
+                totalNodes = hudState.totalNodes,
+                bossName = hudState.bossName,
+                dialogState = inGameDialogState,
+                dialogHistory = inGameDialogHistory,
+                onSendQuestion = { question ->
+                    onTriggerInGameDialog(
+                        InGameDialogTrigger.USER_QUESTION,
+                        currentHpPercent,
+                        hudState.wave,
+                        hudState.nodesIndexed,
+                        hudState.totalNodes,
+                        hudState.bossName,
+                        question
+                    )
+                },
+                onRetry = {
+                    onTriggerInGameDialog(
+                        InGameDialogTrigger.MANUAL_CALLOUT,
+                        currentHpPercent,
+                        hudState.wave,
+                        hudState.nodesIndexed,
+                        hudState.totalNodes,
+                        hudState.bossName,
+                        null
+                    )
+                },
+                onResume = {
+                    showGeminiDialogModal = false
+                    engine.isPaused = false
+                    hudState = engine.snapshotHud()
+                }
+            )
         }
 
         // Mission Summary Overlay (Victory / Defeat)
@@ -801,3 +1443,441 @@ private fun StatRow(label: String, value: String, valueColor: Color) {
         Text(text = value, style = MaterialTheme.typography.labelLarge, color = valueColor)
     }
 }
+
+@Composable
+private fun InGameGeminiDialogBubble(
+    dialogState: GeminiChatUiState,
+    highContrast: Boolean,
+    onAskFollowUp: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val isError = dialogState is GeminiChatUiState.Error
+    val surfaceColor = if (highContrast) {
+        Color.Black.copy(alpha = 0.94f)
+    } else {
+        CyberSurfaceElevated.copy(alpha = 0.92f)
+    }
+    val borderColor = when {
+        isError -> VirusCrimson
+        highContrast -> GoogleGold
+        else -> GeminiCyan.copy(alpha = 0.85f)
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = surfaceColor),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.25.dp, borderColor),
+        modifier = Modifier
+            .widthIn(max = 420.dp)
+            .fillMaxWidth()
+            .testTag("in_game_gemini_dialog_bubble")
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            GeminiCharacterEmblem(
+                size = 30.dp
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (isError) "GEMINI COMMS OFFLINE" else "GEMINI ORACLE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isError) VirusCrimson else GoogleGold,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                when (dialogState) {
+                    is GeminiChatUiState.Loading -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = GeminiCyan
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Analyzing combat telemetry...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                    is GeminiChatUiState.Streaming -> {
+                        Text(
+                            text = dialogState.partialText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextPrimary,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    is GeminiChatUiState.Success -> {
+                        Text(
+                            text = dialogState.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextPrimary,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    is GeminiChatUiState.Error -> {
+                        Text(
+                            text = dialogState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = VirusCrimson,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    GeminiChatUiState.Idle -> Unit
+                }
+            }
+            if (isError) {
+                IconButton(
+                    onClick = onRetry,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("retry_in_game_dialog_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = "Retry Gemini dialog",
+                        tint = GoogleGold
+                    )
+                }
+            } else {
+                IconButton(
+                    onClick = onAskFollowUp,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("open_in_game_dialog_modal_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ChatBubbleOutline,
+                        contentDescription = "Ask Gemini tactical question",
+                        tint = GeminiCyan
+                    )
+                }
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("dismiss_in_game_dialog_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "Dismiss Gemini dialog",
+                    tint = TextSecondary
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun InGameGeminiTacticalModal(
+    sector: SectorDefinition,
+    hpPercent: Int,
+    wave: Int,
+    nodesIndexed: Int,
+    totalNodes: Int,
+    bossName: String?,
+    dialogState: GeminiChatUiState,
+    dialogHistory: List<GeminiChatMessage>,
+    onSendQuestion: (String) -> Unit,
+    onRetry: () -> Unit,
+    onResume: () -> Unit
+) {
+    var questionText by remember { mutableStateOf("") }
+    val quickPrompts = remember(sector.id, bossName) {
+        listOf(
+            "How do I beat ${bossName ?: sector.bossName}?",
+            "Best combo right now?",
+            "Need survival tips!",
+            "How to clear Search Nodes fast?"
+        )
+    }
+
+    Dialog(onDismissRequest = onResume) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = CyberSurfaceElevated),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.5.dp, GeminiCyan.copy(alpha = 0.75f)),
+            modifier = Modifier
+                .widthIn(max = 440.dp)
+                .fillMaxWidth()
+                .testTag("in_game_gemini_modal")
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GeminiCharacterEmblem(
+                        size = 32.dp
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "GEMINI IN-GAME COMMS",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = GeminiCyan,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${sector.name} • Wave $wave/${sector.waves} • HP $hpPercent% • Nodes $nodesIndexed/$totalNodes",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(
+                        onClick = onResume,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("close_in_game_dialog_modal_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Close Gemini comms and resume",
+                            tint = TextSecondary
+                        )
+                    }
+                }
+
+                // Live Conversation History + Active Stream
+                Surface(
+                    color = DeepWebVoid.copy(alpha = 0.72f),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, CyberSurfaceBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(210.dp)
+                ) {
+                    LazyColumn(
+                        contentPadding = PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(dialogHistory, key = { it.id }) { msg ->
+                            val isUser = msg.isUser
+                            Surface(
+                                color = if (isUser) GeminiBlue.copy(alpha = 0.22f) else CyberSurface,
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isUser) GeminiBlue.copy(alpha = 0.6f) else GeminiCyan.copy(alpha = 0.4f)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = if (isUser) "YOU" else "GEMINI ORACLE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isUser) GeminiCyan else GoogleGold,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = msg.text,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextPrimary
+                                    )
+                                }
+                            }
+                        }
+
+                        when (dialogState) {
+                            is GeminiChatUiState.Loading -> {
+                                item(key = "streaming_loading") {
+                                    Row(
+                                        modifier = Modifier.padding(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = GeminiCyan
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Gemini Oracle is responding...",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+                            }
+                            is GeminiChatUiState.Streaming -> {
+                                item(key = "streaming_active") {
+                                    Surface(
+                                        color = CyberSurface,
+                                        shape = RoundedCornerShape(12.dp),
+                                        border = BorderStroke(1.dp, GeminiCyan),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Text(
+                                                text = "GEMINI ORACLE • LIVE",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = GoogleGold,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = dialogState.partialText,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = TextPrimary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            is GeminiChatUiState.Error -> {
+                                item(key = "streaming_error") {
+                                    Surface(
+                                        color = VirusCrimson.copy(alpha = 0.14f),
+                                        shape = RoundedCornerShape(12.dp),
+                                        border = BorderStroke(1.dp, VirusCrimson),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Text(
+                                                text = dialogState.message,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = VirusCrimson
+                                            )
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            OutlinedButton(
+                                                onClick = onRetry,
+                                                border = BorderStroke(1.dp, GoogleGold),
+                                                modifier = Modifier
+                                                    .height(48.dp)
+                                                    .testTag("modal_retry_in_game_dialog_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Refresh,
+                                                    contentDescription = null,
+                                                    tint = GoogleGold,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("RETRY COMMS", color = GoogleGold)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else -> Unit
+                        }
+                    }
+                }
+
+                // Quick Tactical Prompt Chips
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    quickPrompts.forEachIndexed { idx, promptLabel ->
+                        OutlinedButton(
+                            onClick = { onSendQuestion(promptLabel) },
+                            enabled = dialogState !is GeminiChatUiState.Loading && dialogState !is GeminiChatUiState.Streaming,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, GeminiCyan.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("quick_prompt_chip_$idx")
+                        ) {
+                            Text(
+                                text = promptLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = GeminiCyan
+                            )
+                        }
+                    }
+                }
+
+                // Custom Question Input
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = questionText,
+                        onValueChange = { questionText = it },
+                        placeholder = {
+                            Text(
+                                text = "Ask Gemini for battle advice...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = GeminiCyan,
+                            unfocusedBorderColor = CyberSurfaceBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("in_game_dialog_input")
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
+                            val trimmed = questionText.trim()
+                            if (trimmed.isNotEmpty()) {
+                                questionText = ""
+                                onSendQuestion(trimmed)
+                            }
+                        },
+                        enabled = questionText.isNotBlank() &&
+                            dialogState !is GeminiChatUiState.Loading &&
+                            dialogState !is GeminiChatUiState.Streaming,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(GeminiCyan.copy(alpha = 0.2f))
+                            .border(1.dp, GeminiCyan, CircleShape)
+                            .testTag("in_game_dialog_send_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.Send,
+                            contentDescription = "Send question to Gemini",
+                            tint = GeminiCyan
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = onResume,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = GoogleGreen,
+                        contentColor = DeepWebVoid
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("resume_battle_from_gemini_button")
+                ) {
+                    Text(
+                        text = "RESUME BATTLE",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+

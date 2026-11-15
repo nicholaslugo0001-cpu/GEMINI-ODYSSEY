@@ -26,6 +26,7 @@ import com.example.game.ItemDropEntity
 import com.example.game.ItemUpgradeType
 import com.example.game.PlayerEntity
 import com.example.game.SearchNodeEntity
+import com.example.multiplayer.RemotePlayerState
 import com.example.ui.theme.AdwareMagenta
 import com.example.ui.theme.DeepWebVoid
 import com.example.ui.theme.GeminiBlue
@@ -51,6 +52,7 @@ private data class NodeItem(val node: SearchNodeEntity, override val sortY: Floa
 private data class CoinItem(val coin: CoinEntity, override val sortY: Float = coin.y) : RenderItem
 private data class EnemyItem(val enemy: EnemyEntity, override val sortY: Float = enemy.y) : RenderItem
 private data class PlayerItem(val player: PlayerEntity, override val sortY: Float = player.y) : RenderItem
+private data class RemotePlayerItem(val remote: RemotePlayerState, override val sortY: Float = remote.y) : RenderItem
 private data class ItemDropRender(val item: ItemDropEntity, override val sortY: Float = item.y) : RenderItem
 private data class TetrisCellRender(
     val wx: Float,
@@ -250,6 +252,7 @@ fun WebArenaCanvas(
         engine.coins.forEach { renderList.add(CoinItem(it)) }
         engine.items.forEach { renderList.add(ItemDropRender(it)) }
         engine.enemies.forEach { renderList.add(EnemyItem(it)) }
+        engine.remotePlayers.forEach { renderList.add(RemotePlayerItem(it)) }
         renderList.add(PlayerItem(engine.player))
 
         renderList.sortBy { it.sortY }
@@ -306,6 +309,30 @@ fun WebArenaCanvas(
                     val bob = abs(sin(item.player.walkPhase)) * 6f
                     val body = project(item.player.x, item.player.y, bob)
                     drawCelGeminiHero(item.player, ground, body, time)
+                }
+                is RemotePlayerItem -> {
+                    val ground = project(item.remote.x, item.remote.y, 0f)
+                    val bob = abs(sin(item.remote.walkPhase)) * 6f
+                    val body = project(item.remote.x, item.remote.y, bob)
+                    val proxy = PlayerEntity(
+                        x = item.remote.x,
+                        y = item.remote.y,
+                        facingAngle = item.remote.facingAngle,
+                        hp = item.remote.hp,
+                        maxHp = item.remote.maxHp,
+                        isGuarding = item.remote.isGuarding,
+                        slashActiveTimer = if (item.remote.isSlashing) 0.14f else 0f,
+                        slashComboStep = item.remote.slashComboStep,
+                        walkPhase = item.remote.walkPhase
+                    )
+                    val armorTint = when (item.remote.colorIndex.mod(4)) {
+                        0 -> GeminiBlue
+                        1 -> VirusCrimson
+                        2 -> GoogleGold
+                        else -> GoogleGreen
+                    }
+                    drawCelGeminiHero(proxy, ground, body, time, primaryArmorColor = armorTint)
+                    drawRemotePlayerNameplate(item.remote, body, armorTint, textPaint)
                 }
             }
         }
@@ -483,11 +510,41 @@ private fun DrawScope.drawCelGoogleCoin(
     }
 }
 
+private fun DrawScope.drawRemotePlayerNameplate(
+    remote: RemotePlayerState,
+    body: ProjPoint,
+    accentColor: Color,
+    textPaint: Paint
+) {
+    val s = body.scale
+    val nameY = body.y - 82f * s
+    val barW = 48f * s
+    val ratio = (remote.hp / remote.maxHp.coerceAtLeast(1f)).coerceIn(0f, 1f)
+
+    textPaint.textSize = 18f * s.coerceIn(0.8f, 1.3f)
+    textPaint.color = InkOutline.toArgb()
+    drawContext.canvas.nativeCanvas.drawText(remote.displayName.take(12), body.x + 1.5f, nameY - 8f * s + 1.5f, textPaint)
+    textPaint.color = accentColor.toArgb()
+    drawContext.canvas.nativeCanvas.drawText(remote.displayName.take(12), body.x, nameY - 8f * s, textPaint)
+
+    drawRect(
+        color = InkOutline,
+        topLeft = Offset(body.x - barW / 2f - 1.5f, nameY - 1.5f),
+        size = Size(barW + 3f, 7f * s)
+    )
+    drawRect(
+        color = if (remote.isAlive) GoogleGreen else VirusCrimson,
+        topLeft = Offset(body.x - barW / 2f, nameY),
+        size = Size(barW * ratio, 4.5f * s)
+    )
+}
+
 private fun DrawScope.drawCelGeminiHero(
     player: PlayerEntity,
     ground: ProjPoint,
     body: ProjPoint,
-    time: Float
+    time: Float,
+    primaryArmorColor: Color = GeminiBlue
 ) {
     val s = body.scale
     val sg = ground.scale
@@ -513,7 +570,7 @@ private fun DrawScope.drawCelGeminiHero(
         lineTo(capeX - 13f * s, capeY + 24f * s - flutter)
         close()
     }
-    drawPath(capePath, color = VirusCrimson)
+    drawPath(capePath, color = if (primaryArmorColor == VirusCrimson) GeminiBlue else VirusCrimson)
     drawPath(capePath, color = InkOutline, style = Stroke(width = 3f))
 
     // 2. 3D Articulated Boots/Legs with Google Green & Slate armor
@@ -544,7 +601,7 @@ private fun DrawScope.drawCelGeminiHero(
     )
 
     // 3. 3D Volumetric Armored Torso (Google Blue + Cyan highlight + Dark Blue shadow + Google 4-color crest)
-    val torsoColor = if (player.hitFlashTimer > 0f) VirusCrimson else GeminiBlue
+    val torsoColor = if (player.hitFlashTimer > 0f) VirusCrimson else primaryArmorColor
     drawRoundRect(
         color = InkOutline,
         topLeft = Offset(body.x - 17f * s, body.y - 43f * s),

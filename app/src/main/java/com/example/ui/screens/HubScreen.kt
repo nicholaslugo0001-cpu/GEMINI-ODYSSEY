@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -96,13 +97,32 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.LightMode
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.IconButton
+import com.example.audio.ClassicalTechnoTrack
+import com.example.audio.ClassicalTechnoTracks
 import androidx.compose.material3.Switch
 import androidx.compose.ui.window.Dialog
 import com.example.data.ThemeMode
+import androidx.compose.material.icons.automirrored.rounded.Login
+import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.Leaderboard
+import androidx.compose.material3.CircularProgressIndicator
+import com.example.LeaderboardUiState
+import com.example.data.LeaderboardEntry
 
-private data class GooglePalette(
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material.icons.rounded.Groups
+import com.example.ai.GeminiBriefingUiState
+import com.example.ai.GeminiChatMessage
+import com.example.ai.GeminiChatUiState
+import com.example.multiplayer.CoopSessionState
+import com.example.multiplayer.DiscoveredLanHost
+
+internal data class GooglePalette(
     val bg: Color,
     val surfaceGray: Color,
     val border: Color,
@@ -153,6 +173,17 @@ private fun rememberGooglePalette(themeMode: ThemeMode, highContrast: Boolean): 
 @Composable
 fun HubScreen(
     progress: PlayerProgress,
+    leaderboardState: LeaderboardUiState,
+    coopSession: CoopSessionState,
+    discoveredLanHosts: List<DiscoveredLanHost>,
+    currentUserId: String,
+    isGuestMode: Boolean = false,
+    geminiChatState: GeminiChatUiState,
+    geminiChatMessages: List<GeminiChatMessage>,
+    geminiBriefingState: GeminiBriefingUiState,
+    onAskGemini: (String) -> Unit,
+    onRefreshGeminiBriefing: () -> Unit,
+    onClearGeminiChat: () -> Unit,
     onLaunchSector: (SectorDefinition) -> Unit,
     onPurchaseUpgrade: (UpgradeType) -> Unit,
     onAllocateSkillPoint: (StatType) -> Unit,
@@ -160,7 +191,25 @@ fun HubScreen(
     onSetHighContrast: (Boolean) -> Unit,
     onSetLargeTouchTargets: (Boolean) -> Unit,
     onSetReducedMotion: (Boolean) -> Unit,
-    onToggleHandedness: (Boolean) -> Unit
+    onSetSoundEnabled: (Boolean) -> Unit,
+    onSetHapticsEnabled: (Boolean) -> Unit,
+    onSetMusicEnabled: (Boolean) -> Unit = {},
+    onSelectMusicTrack: (String) -> Unit = {},
+    onToggleHandedness: (Boolean) -> Unit,
+    onSyncCloud: () -> Unit,
+    onHostOnlineRoom: (String) -> Unit,
+    onJoinOnlineRoom: (String) -> Unit,
+    onHostLanRoom: (String) -> Unit,
+    onJoinLanHost: (DiscoveredLanHost) -> Unit,
+    onJoinLanByAddress: (String) -> Unit,
+    onStartLanDiscovery: () -> Unit,
+    onStopLanDiscovery: () -> Unit,
+    onToggleCoopReady: () -> Unit,
+    onSelectCoopSector: (String) -> Unit,
+    onStartCoopStage: () -> Unit,
+    onLeaveCoopRoom: () -> Unit,
+    onSignInWithGoogle: () -> Unit = {},
+    onSignOut: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
@@ -183,7 +232,9 @@ fun HubScreen(
             // Top Google Account / Stats Bar
             GoogleTopAccountBar(
                 progress = progress,
+                isGuestMode = isGuestMode,
                 palette = palette,
+                onToggleMusic = { onSetMusicEnabled(!progress.musicEnabled) },
                 onOpenSettings = { showSettingsDialog = true }
             )
 
@@ -247,26 +298,49 @@ fun HubScreen(
                             tint = GeminiBlue,
                             modifier = Modifier.size(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Icon(
-                            imageVector = Icons.Rounded.AutoAwesome,
-                            contentDescription = null,
-                            tint = GoogleGold,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        IconButton(
+                            onClick = {
+                                selectedTab = 5
+                                if (searchQuery.isNotBlank()) {
+                                    onAskGemini(searchQuery)
+                                    searchQuery = ""
+                                } else if (geminiBriefingState is GeminiBriefingUiState.Idle) {
+                                    onRefreshGeminiBriefing()
+                                }
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("search_bar_ai_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AutoAwesome,
+                                contentDescription = "Ask Gemini AI",
+                                tint = GoogleGold,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Google Homepage Quick Action Buttons ("Play Stage" & "I'm Feeling Lucky")
+                // Google Homepage Quick Action Buttons ("Search • Start" & "I'm Feeling Lucky")
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val unlockedSectors = WebSectors.all.filter { progress.totalStars >= it.unlockRequirementStars }
+                    val queryMatchedSector = if (searchQuery.isNotBlank()) {
+                        unlockedSectors.firstOrNull {
+                            it.name.contains(searchQuery, ignoreCase = true) ||
+                                it.userSearchQuery.contains(searchQuery, ignoreCase = true) ||
+                                it.bossName.contains(searchQuery, ignoreCase = true)
+                        }
+                    } else null
                     Button(
-                        onClick = { onLaunchSector(unlockedSectors.lastOrNull() ?: WebSectors.all.first()) },
+                        onClick = {
+                            onLaunchSector(queryMatchedSector ?: unlockedSectors.lastOrNull() ?: WebSectors.all.first())
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = palette.surfaceGray,
                             contentColor = palette.textDark
@@ -274,11 +348,13 @@ fun HubScreen(
                         shape = RoundedCornerShape(8.dp),
                         border = androidx.compose.foundation.BorderStroke(palette.borderWidth, palette.border),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                        modifier = Modifier.height(44.dp)
+                        modifier = Modifier
+                            .height(44.dp)
+                            .testTag("google_search_start_button")
                     ) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = palette.activeBlue, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Google Search Battle", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                        Icon(Icons.Rounded.Search, contentDescription = null, tint = palette.activeBlue, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Google Search • Start", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                     }
 
                     OutlinedButton(
@@ -309,8 +385,9 @@ fun HubScreen(
                 modifier = Modifier
                     .widthIn(max = 640.dp)
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(20.dp)
+                horizontalArrangement = Arrangement.spacedBy(18.dp)
             ) {
                 GoogleSearchTab(
                     label = "All Sectors",
@@ -319,6 +396,27 @@ fun HubScreen(
                     palette = palette,
                     testTag = "tab_sectors",
                     onClick = { selectedTab = 0 }
+                )
+                GoogleSearchTab(
+                    label = "AI Mode",
+                    icon = Icons.Rounded.AutoAwesome,
+                    selected = selectedTab == 5,
+                    palette = palette,
+                    testTag = "tab_ai_mode",
+                    onClick = {
+                        selectedTab = 5
+                        if (geminiBriefingState is GeminiBriefingUiState.Idle) {
+                            onRefreshGeminiBriefing()
+                        }
+                    }
+                )
+                GoogleSearchTab(
+                    label = if (coopSession.isActive) "Co-Op (${coopSession.playerCount}/4)" else "Co-Op (4P)",
+                    icon = Icons.Rounded.Groups,
+                    selected = selectedTab == 4,
+                    palette = palette,
+                    testTag = "tab_coop",
+                    onClick = { selectedTab = 4 }
                 )
                 GoogleSearchTab(
                     label = "Tech Lab",
@@ -335,6 +433,14 @@ fun HubScreen(
                     palette = palette,
                     testTag = "tab_codex",
                     onClick = { selectedTab = 2 }
+                )
+                GoogleSearchTab(
+                    label = "Rankings",
+                    icon = Icons.Rounded.Leaderboard,
+                    selected = selectedTab == 3,
+                    palette = palette,
+                    testTag = "tab_leaderboard",
+                    onClick = { selectedTab = 3 }
                 )
             }
             HorizontalDivider(color = palette.border, thickness = palette.borderWidth)
@@ -360,7 +466,45 @@ fun HubScreen(
                         onPurchaseUpgrade = onPurchaseUpgrade,
                         onAllocateSkillPoint = onAllocateSkillPoint
                     )
-                    else -> CodexTab(progress = progress, palette = palette)
+                    2 -> CodexTab(progress = progress, palette = palette)
+                    4 -> CoopLobbyTab(
+                        progress = progress,
+                        coopSession = coopSession,
+                        discoveredLanHosts = discoveredLanHosts,
+                        currentUserId = currentUserId,
+                        isGuestMode = isGuestMode,
+                        palette = palette,
+                        onHostOnlineRoom = onHostOnlineRoom,
+                        onJoinOnlineRoom = onJoinOnlineRoom,
+                        onHostLanRoom = onHostLanRoom,
+                        onJoinLanHost = onJoinLanHost,
+                        onJoinLanByAddress = onJoinLanByAddress,
+                        onStartLanDiscovery = onStartLanDiscovery,
+                        onStopLanDiscovery = onStopLanDiscovery,
+                        onToggleReady = onToggleCoopReady,
+                        onSelectSector = onSelectCoopSector,
+                        onStartCoopStage = onStartCoopStage,
+                        onLeaveCoopRoom = onLeaveCoopRoom,
+                        onSignInWithGoogle = onSignInWithGoogle
+                    )
+                    5 -> GeminiAiModeTab(
+                        progress = progress,
+                        chatState = geminiChatState,
+                        chatMessages = geminiChatMessages,
+                        briefingState = geminiBriefingState,
+                        palette = palette,
+                        onAskGemini = onAskGemini,
+                        onRefreshBriefing = onRefreshGeminiBriefing,
+                        onClearChat = onClearGeminiChat,
+                        onLaunchSector = onLaunchSector
+                    )
+                    else -> LeaderboardTab(
+                        leaderboardState = leaderboardState,
+                        currentUserId = currentUserId,
+                        palette = palette,
+                        onSyncCloud = onSyncCloud,
+                        onSignInWithGoogle = onSignInWithGoogle
+                    )
                 }
             }
         }
@@ -369,13 +513,26 @@ fun HubScreen(
     if (showSettingsDialog) {
         SettingsAndCreditsDialog(
             progress = progress,
+            isGuestMode = isGuestMode,
             palette = palette,
             onDismiss = { showSettingsDialog = false },
             onSetThemeMode = onSetThemeMode,
             onSetHighContrast = onSetHighContrast,
             onSetLargeTouchTargets = onSetLargeTouchTargets,
             onSetReducedMotion = onSetReducedMotion,
-            onToggleHandedness = onToggleHandedness
+            onSetSoundEnabled = onSetSoundEnabled,
+            onSetHapticsEnabled = onSetHapticsEnabled,
+            onSetMusicEnabled = onSetMusicEnabled,
+            onSelectMusicTrack = onSelectMusicTrack,
+            onToggleHandedness = onToggleHandedness,
+            onSignInWithGoogle = {
+                showSettingsDialog = false
+                onSignInWithGoogle()
+            },
+            onSignOut = {
+                showSettingsDialog = false
+                onSignOut()
+            }
         )
     }
 }
@@ -383,7 +540,9 @@ fun HubScreen(
 @Composable
 private fun GoogleTopAccountBar(
     progress: PlayerProgress,
+    isGuestMode: Boolean,
     palette: GooglePalette,
+    onToggleMusic: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     Row(
@@ -402,14 +561,14 @@ private fun GoogleTopAccountBar(
             Spacer(modifier = Modifier.width(8.dp))
             Column {
                 Text(
-                    text = "Gemini Lv.${progress.level}",
+                    text = if (isGuestMode) "Guest Lv.${progress.level}" else "Gemini Lv.${progress.level}",
                     style = MaterialTheme.typography.titleMedium,
                     color = palette.textDark,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "Google-verse Knight",
+                    text = if (isGuestMode) "Guest Mode • Local Save" else "Google-verse Knight",
                     style = MaterialTheme.typography.labelSmall,
                     color = palette.textSub,
                     maxLines = 1,
@@ -468,6 +627,30 @@ private fun GoogleTopAccountBar(
                         color = palette.textDark
                     )
                 }
+            }
+
+            IconButton(
+                onClick = onToggleMusic,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(if (progress.musicEnabled) palette.activeBlue.copy(alpha = 0.14f) else palette.surfaceGray)
+                    .border(
+                        palette.borderWidth,
+                        if (progress.musicEnabled) palette.activeBlue else palette.border,
+                        CircleShape
+                    )
+                    .testTag("hub_music_toggle_button")
+            ) {
+                Icon(
+                    imageVector = if (progress.musicEnabled) Icons.Rounded.MusicNote else Icons.Rounded.MusicOff,
+                    contentDescription = if (progress.musicEnabled) {
+                        "Mute Classical Techno Soundtrack"
+                    } else {
+                        "Unmute Classical Techno Soundtrack"
+                    },
+                    tint = if (progress.musicEnabled) palette.activeBlue else palette.textSub
+                )
             }
 
             IconButton(
@@ -1068,13 +1251,20 @@ private fun ThreatIntelCard(
 @Composable
 private fun SettingsAndCreditsDialog(
     progress: PlayerProgress,
+    isGuestMode: Boolean,
     palette: GooglePalette,
     onDismiss: () -> Unit,
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetHighContrast: (Boolean) -> Unit,
     onSetLargeTouchTargets: (Boolean) -> Unit,
     onSetReducedMotion: (Boolean) -> Unit,
-    onToggleHandedness: (Boolean) -> Unit
+    onSetSoundEnabled: (Boolean) -> Unit,
+    onSetHapticsEnabled: (Boolean) -> Unit,
+    onSetMusicEnabled: (Boolean) -> Unit,
+    onSelectMusicTrack: (String) -> Unit,
+    onToggleHandedness: (Boolean) -> Unit,
+    onSignInWithGoogle: () -> Unit,
+    onSignOut: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -1203,6 +1393,126 @@ private fun SettingsAndCreditsDialog(
                     testTag = "toggle_left_handed",
                     onCheckedChange = onToggleHandedness
                 )
+                AccessibilityToggleRow(
+                    title = "Sound Effects",
+                    subtitle = "Synthesized audio feedback for combat and pickups",
+                    checked = progress.soundEnabled,
+                    palette = palette,
+                    testTag = "toggle_sound_enabled",
+                    onCheckedChange = onSetSoundEnabled
+                )
+                AccessibilityToggleRow(
+                    title = "Haptic Feedback",
+                    subtitle = "Tactile vibration for attacks, blocks, and pickups",
+                    checked = progress.hapticsEnabled,
+                    palette = palette,
+                    testTag = "toggle_haptics_enabled",
+                    onCheckedChange = onSetHapticsEnabled
+                )
+
+                HorizontalDivider(color = palette.border, thickness = palette.borderWidth)
+
+                Text(
+                    text = "CLASSICAL TECHNO SOUNDTRACK",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = palette.textSub
+                )
+
+                AccessibilityToggleRow(
+                    title = "Techno Classical Music",
+                    subtitle = "Public-domain classical melodies remixed as live synth techno",
+                    checked = progress.musicEnabled,
+                    palette = palette,
+                    testTag = "toggle_music_enabled",
+                    onCheckedChange = onSetMusicEnabled
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val autoSelected = progress.selectedMusicTrackId == ClassicalTechnoTracks.AUTO_TRACK_ID
+                    Surface(
+                        onClick = { onSelectMusicTrack(ClassicalTechnoTracks.AUTO_TRACK_ID) },
+                        color = if (autoSelected) palette.activeBlue.copy(alpha = 0.14f) else palette.surfaceGray,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            palette.borderWidth,
+                            if (autoSelected) palette.activeBlue else palette.border
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("music_track_auto")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Auto Remix (Match Stage & Boss)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = palette.textDark
+                                )
+                                Text(
+                                    text = "Switches Bach, Beethoven, Grieg & Mozart — plus slowed Dark Boss Music on Boss waves",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = palette.textSub
+                                )
+                            }
+                            if (autoSelected) {
+                                Icon(
+                                    imageVector = Icons.Rounded.MusicNote,
+                                    contentDescription = "Selected Track",
+                                    tint = palette.activeBlue
+                                )
+                            }
+                        }
+                    }
+
+                    ClassicalTechnoTrack.entries.forEach { track ->
+                        val isSelected = progress.selectedMusicTrackId == track.id
+                        val accentColor = if (track.isBossTrack) VirusCrimson else palette.activeBlue
+                        Surface(
+                            onClick = { onSelectMusicTrack(track.id) },
+                            color = if (isSelected) accentColor.copy(alpha = 0.14f) else palette.surfaceGray,
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(
+                                palette.borderWidth,
+                                if (isSelected) accentColor else palette.border
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("music_track_${track.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${track.title} • ${track.bpm} BPM",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = if (track.isBossTrack) VirusCrimson else palette.textDark
+                                    )
+                                    Text(
+                                        text = "${track.composer} — ${track.workTitle}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = palette.textSub
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.MusicNote,
+                                        contentDescription = "Selected Track",
+                                        tint = accentColor
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
                 HorizontalDivider(color = palette.border, thickness = palette.borderWidth)
 
@@ -1245,8 +1555,275 @@ private fun SettingsAndCreditsDialog(
                             style = MaterialTheme.typography.labelSmall,
                             color = palette.textSub
                         )
+                        Text(
+                            text = "Soundtrack: Free-to-use public-domain classical works (J.S. Bach, L. van Beethoven, E. Grieg, W.A. Mozart, G. Verdi, M. Mussorgsky) procedurally synthesized & remixed in-app.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = palette.textSub
+                        )
                     }
                 }
+
+                if (isGuestMode) {
+                    Button(
+                        onClick = onSignInWithGoogle,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = palette.activeBlue,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("settings_guest_sign_in_button")
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Sign in with Google (Sync Cloud)", style = MaterialTheme.typography.labelLarge)
+                    }
+                    OutlinedButton(
+                        onClick = onSignOut,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = palette.surfaceGray,
+                            contentColor = palette.textDark
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(palette.borderWidth, palette.border),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("exit_guest_button")
+                    ) {
+                        Text("Back to Title Screen", style = MaterialTheme.typography.labelLarge)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onSignOut,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = palette.surfaceGray,
+                            contentColor = VirusCrimson
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(palette.borderWidth, VirusCrimson.copy(alpha = 0.7f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("sign_out_button")
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Sign Out", style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LeaderboardTab(
+    leaderboardState: LeaderboardUiState,
+    currentUserId: String,
+    palette: GooglePalette,
+    onSyncCloud: () -> Unit,
+    onSignInWithGoogle: () -> Unit
+) {
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "GLOBAL LEADERBOARD • FIRESTORE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = palette.textSub
+                )
+                if (leaderboardState !is LeaderboardUiState.GuestMode) {
+                    OutlinedButton(
+                        onClick = onSyncCloud,
+                        shape = RoundedCornerShape(18.dp),
+                        border = androidx.compose.foundation.BorderStroke(palette.borderWidth, palette.activeBlue),
+                        modifier = Modifier.height(40.dp)
+                    ) {
+                        Icon(Icons.Rounded.CloudDone, contentDescription = null, tint = palette.activeBlue, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Sync Now", style = MaterialTheme.typography.labelMedium, color = palette.activeBlue)
+                    }
+                }
+            }
+        }
+
+        when (leaderboardState) {
+            is LeaderboardUiState.GuestMode -> {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = palette.bg),
+                        shape = RoundedCornerShape(16.dp),
+                        border = androidx.compose.foundation.BorderStroke(palette.borderWidth, palette.activeBlue),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Playing in Guest Mode",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = palette.textDark
+                            )
+                            Text(
+                                text = "Your coins, levels, stars, and upgrades are saved safely on this device. Sign in with Google to sync your progress to Firestore and join the global leaderboard!",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = palette.textSub
+                            )
+                            Button(
+                                onClick = onSignInWithGoogle,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = palette.activeBlue,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(20.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("leaderboard_guest_sign_in_button")
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("SIGN IN WITH GOOGLE", style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+                    }
+                }
+            }
+            is LeaderboardUiState.Loading -> {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = palette.activeBlue)
+                    }
+                }
+            }
+            is LeaderboardUiState.Error -> {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = palette.bg),
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(palette.borderWidth, VirusCrimson)
+                    ) {
+                        Text(
+                            text = leaderboardState.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = VirusCrimson,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                }
+            }
+            is LeaderboardUiState.Success -> {
+                if (leaderboardState.entries.isEmpty()) {
+                    item {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = palette.bg),
+                            shape = RoundedCornerShape(14.dp),
+                            border = androidx.compose.foundation.BorderStroke(palette.borderWidth, palette.border),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "No rankings synced yet. Tap Sync Now or complete a stage to post your score!",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = palette.textSub,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
+                } else {
+                    items(leaderboardState.entries.size) { index ->
+                        val entry = leaderboardState.entries[index]
+                        val isMe = entry.userId == currentUserId
+                        LeaderboardRowCard(
+                            rank = index + 1,
+                            entry = entry,
+                            isCurrentUser = isMe,
+                            palette = palette
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LeaderboardRowCard(
+    rank: Int,
+    entry: LeaderboardEntry,
+    isCurrentUser: Boolean,
+    palette: GooglePalette
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = palette.bg),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            palette.borderWidth,
+            if (isCurrentUser) palette.activeBlue else palette.border
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                color = when (rank) {
+                    1 -> GoogleGold.copy(alpha = 0.22f)
+                    2 -> GeminiBlue.copy(alpha = 0.18f)
+                    3 -> GoogleGreen.copy(alpha = 0.18f)
+                    else -> palette.surfaceGray
+                },
+                shape = CircleShape,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "#$rank",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (rank == 1) GoogleGold else palette.textDark
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (isCurrentUser) "${entry.displayName} (You)" else entry.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = palette.textDark,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Lv.${entry.level} • ${entry.missionsCompleted} Missions • ${entry.totalCoinsCollected} G",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = palette.textSub
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Star, contentDescription = null, tint = GoogleGold, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "${entry.totalStars}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = palette.textDark
+                )
             }
         }
     }
